@@ -2,6 +2,7 @@
 
 #include <esp_afe_sr_iface.h>
 #include <esp_afe_sr_models.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <string.h>
@@ -17,30 +18,25 @@ class AECHandler {
       : afe_handle(nullptr),
         afe_data(nullptr),
         speaker_reference_buffer(nullptr),
-        speaker_reference_mutex(nullptr) {}
+        speaker_reference_mutex(nullptr),
+        frame_size(0) {}
 
   bool init() {
-    // Initialize mutex first
+    // Initialize mutex
     speaker_reference_mutex = xSemaphoreCreateMutex();
     if (!speaker_reference_mutex) {
-      ESP_LOGE("AEC", "Failed to create speaker reference mutex");
+      ESP_LOGE("AEC", "Failed to create mutex");
       return false;
     }
 
-    // Initialize reference buffer with increased size
-    speaker_reference_buffer =
-        (int16_t*)heap_caps_malloc(SAMPLES_PER_FRAME * sizeof(int16_t),
-                                   MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (!speaker_reference_buffer) {
-      ESP_LOGE("AEC", "Failed to allocate speaker reference buffer");
-      return false;
-    }
-    memset(speaker_reference_buffer, 0, SAMPLES_PER_FRAME * sizeof(int16_t));
-
-    // Get AFE handle for voice communication
+    // Get AFE handle
     afe_handle = const_cast<esp_afe_sr_iface_t*>(&ESP_AFE_VC_HANDLE);
+    if (!afe_handle) {
+      ESP_LOGE("AEC", "Failed to get AFE handle");
+      return false;
+    }
 
-    // Configure AFE with optimized settings for mono setup
+    // Configure AFE
     afe_config_t afe_config = AFE_CONFIG_DEFAULT();
     afe_config.aec_init = true;
     afe_config.se_init = true;
@@ -50,14 +46,13 @@ class AECHandler {
     afe_config.voice_communication_agc_init = true;
     afe_config.voice_communication_agc_gain = 15;
     afe_config.afe_mode = SR_MODE_LOW_COST;
-    afe_config.afe_perferred_core = 0;
+    afe_config.afe_perferred_core = 1;
     afe_config.afe_perferred_priority = 5;
-    afe_config.afe_ringbuf_size = 320;  // Increased ring buffer size
-
-    // Configure for single mic + reference as per documentation
+    afe_config.afe_ringbuf_size = 50;
+    afe_config.memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     afe_config.pcm_config.total_ch_num = 2;  // Mic + Reference
     afe_config.pcm_config.mic_num = 1;       // Single mic
-    afe_config.pcm_config.ref_num = 1;       // Single reference channel
+    afe_config.pcm_config.ref_num = 1;       // Single reference
     afe_config.pcm_config.sample_rate = SAMPLE_RATE;
 
     // Create AFE instance
@@ -67,10 +62,26 @@ class AECHandler {
       return false;
     }
 
-    // Get expected chunk size for proper buffer allocation
-    int chunksize = afe_handle->get_feed_chunksize(afe_data);
-    ESP_LOGI("AEC", "AFE chunk size: %d", chunksize);
-    ESP_LOGI("AEC", "AFE initialized successfully");
+    // Get the frame size AFE expects
+    frame_size = afe_handle->get_feed_chunksize(afe_data);
+    if (frame_size <= 0) {
+      ESP_LOGE("AEC", "Invalid frame size from AFE");
+      return false;
+    }
+
+    ESP_LOGI("AEC", "AFE frame size: %d", frame_size);
+
+    // Initialize reference buffer with AFE frame size
+    speaker_reference_buffer = (int16_t*)heap_caps_malloc(
+        frame_size * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+
+    if (!speaker_reference_buffer) {
+      ESP_LOGE("AEC", "Failed to allocate reference buffer");
+      return false;
+    }
+
+    memset(speaker_reference_buffer, 0, frame_size * sizeof(int16_t));
+    ESP_LOGI("AEC", "AEC initialized successfully");
     return true;
   }
 
@@ -92,59 +103,82 @@ class AECHandler {
     }
   }
 
-  // Process mic input with reference signal
   int16_t* processAudio(int16_t* mic_data, size_t* samples_processed) {
-    if (!afe_handle || !afe_data) {
-      ESP_LOGE("AEC", "AFE not initialized");
+    if (!afe_handle || !afe_data || !mic_data) {
+      ESP_LOGE("AEC", "Invalid state or input");
       return mic_data;
     }
 
-    // Create interleaved buffer with proper allocation
-    int16_t* combined_buffer =
-        (int16_t*)heap_caps_malloc(SAMPLES_PER_FRAME * 2 * sizeof(int16_t),
-                                   MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    static int64_t last_error_time = 0;
+    int64_t current_time =
+        esp_timer_get_time() / 1000;  // Convert to milliseconds
+
+    // Create interleaved buffer - exact size AFE expects
+    int16_t* combined_buffer = (int16_t*)heap_caps_malloc(
+        frame_size * 2 * sizeof(int16_t),  // 2 channels
+        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
     if (!combined_buffer) {
       ESP_LOGE("AEC", "Failed to allocate combined buffer");
       return mic_data;
     }
 
-    // Interleave mic and reference data with synchronization
+    // Interleave mic and reference data
+    bool has_reference = false;
     if (xSemaphoreTake(speaker_reference_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      // Ensure proper interleaving as per documentation
-      for (int i = 0; i < SAMPLES_PER_FRAME; i++) {
-        combined_buffer[i * 2] = mic_data[i];  // Mic channel
-        combined_buffer[i * 2 + 1] = speaker_reference_buffer[i];  // Reference
+      if (speaker_reference_buffer) {
+        has_reference = true;
+        // Carefully interleave exactly frame_size samples
+        for (int i = 0; i < frame_size; i++) {
+          combined_buffer[i * 2] = mic_data[i];
+          combined_buffer[i * 2 + 1] = speaker_reference_buffer[i];
+        }
       }
       xSemaphoreGive(speaker_reference_mutex);
     }
 
-    // Process through AFE
-    int ret = afe_handle->feed(afe_data, combined_buffer);
-    if (ret != 0) {
-      ESP_LOGW("AEC", "AFE feed returned: %d", ret);
-      heap_caps_free(combined_buffer);
-      return mic_data;
+    // If no reference data, fill with zeros
+    if (!has_reference) {
+      for (int i = 0; i < frame_size; i++) {
+        combined_buffer[i * 2] = mic_data[i];
+        combined_buffer[i * 2 + 1] = 0;
+      }
+      if (current_time - last_error_time > 1000) {  // Log once per second
+        ESP_LOGW("AEC", "No reference data available");
+        last_error_time = current_time;
+      }
     }
 
-    // Fetch processed audio with immediate retry on failure
-    afe_fetch_result_t* result = nullptr;
-    int retry_count = 0;
-    const int max_retries = 3;
+    // Feed data to AFE
+    int ret = afe_handle->feed(afe_data, combined_buffer);
+    if (ret != 0) {
+      if (current_time - last_error_time > 1000) {  // Log once per second
+        ESP_LOGW("AEC", "AFE feed failed with status: %d", ret);
+        if (ret == 512) {
+          ESP_LOGW("AEC", "Feed size: %d, Frame size: %d", frame_size * 2,
+                   frame_size);
+        }
+        last_error_time = current_time;
+      }
+    }
 
-    while (retry_count < max_retries) {
+    // Try to fetch processed audio
+    afe_fetch_result_t* result = nullptr;
+    for (int retry = 0; retry < 2; retry++) {  // Try twice
       result = afe_handle->fetch(afe_data);
       if (result && result->data) {
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(1));
-      retry_count++;
+      vTaskDelay(1);  // Small delay before retry
     }
 
-    heap_caps_free(combined_buffer);
+    heap_caps_free(combined_buffer);  // Free temporary buffer
 
     if (!result || !result->data) {
-      ESP_LOGE("AEC", "AFE fetch failed after %d retries", retry_count);
+      if (current_time - last_error_time > 1000) {
+        ESP_LOGE("AEC", "AFE fetch failed");
+        last_error_time = current_time;
+      }
       return mic_data;
     }
 
@@ -152,18 +186,16 @@ class AECHandler {
     return (int16_t*)result->data;
   }
 
-  // Store reference signal from speaker with size validation
   void updateReferenceBuffer(const int16_t* speaker_data, size_t samples) {
-    if (!speaker_data || samples == 0) {
+    if (!speaker_data || samples == 0 || samples > frame_size) {
       return;
     }
 
     if (speaker_reference_mutex &&
         xSemaphoreTake(speaker_reference_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       if (speaker_reference_buffer) {
-        size_t copy_size = std::min(samples * sizeof(int16_t),
-                                    SAMPLES_PER_FRAME * sizeof(int16_t));
-        memcpy(speaker_reference_buffer, speaker_data, copy_size);
+        memcpy(speaker_reference_buffer, speaker_data,
+               samples * sizeof(int16_t));
       }
       xSemaphoreGive(speaker_reference_mutex);
     }
@@ -174,4 +206,5 @@ class AECHandler {
   esp_afe_sr_data_t* afe_data;
   int16_t* speaker_reference_buffer;
   SemaphoreHandle_t speaker_reference_mutex;
+  int frame_size;  // AFE's expected frame size
 };

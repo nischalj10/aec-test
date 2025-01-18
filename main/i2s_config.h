@@ -4,14 +4,13 @@
 
 #include "esp_log.h"
 
-// Audio configuration - adjusted based on ESP AFE documentation
+// Audio configuration
 #define SAMPLE_RATE 16000
-#define SAMPLES_PER_FRAME 320                   // Standard AFE frame size
-#define DMA_FRAME_SIZE (SAMPLES_PER_FRAME * 2)  // Account for mic + ref channel
 
-// Increased buffer sizes to prevent overflow
-#define I2S_DMA_BUFFER_COUNT 16  // Increased for better buffering
-#define I2S_DMA_BUFFER_LEN (SAMPLES_PER_FRAME * 2)  // Match AFE frame size
+// AFE frame size is 320 samples
+#define I2S_FRAME_SIZE 320   // AFE frame size
+#define DMA_BUFFER_SIZE 320  // Match AFE frame size
+#define DMA_BUFFER_COUNT 4   // More buffers for better flow
 
 // Pin definitions
 #define I2S_MCK_IO -1  // Not used
@@ -36,14 +35,14 @@ static const i2s_config_t i2s_mic_config = {
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = I2S_DMA_BUFFER_COUNT,
-    .dma_buf_len = I2S_DMA_BUFFER_LEN,
-    .use_apll = true,
-    .fixed_mclk = SAMPLE_RATE * 256,
-    .mclk_multiple = I2S_MCLK_MULTIPLE_256,  // Explicit MCLK multiplier
-};
+    .dma_buf_count = DMA_BUFFER_COUNT,
+    .dma_buf_len = DMA_BUFFER_SIZE,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0,
+    .mclk_multiple = I2S_MCLK_MULTIPLE_256};
 
-// Configure I2S for MAX98357A Speaker with modified buffer size
+// Configure I2S for MAX98357A Speaker
 static const i2s_config_t i2s_speaker_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = SAMPLE_RATE,
@@ -51,15 +50,14 @@ static const i2s_config_t i2s_speaker_config = {
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = I2S_DMA_BUFFER_COUNT,
-    .dma_buf_len = I2S_DMA_BUFFER_LEN,
-    .use_apll = true,
+    .dma_buf_count = DMA_BUFFER_COUNT,
+    .dma_buf_len = DMA_BUFFER_SIZE,
+    .use_apll = false,
     .tx_desc_auto_clear = true,
-    .fixed_mclk = SAMPLE_RATE * 256,
-    .mclk_multiple = I2S_MCLK_MULTIPLE_256,  // Explicit MCLK multiplier
-};
+    .fixed_mclk = 0,
+    .mclk_multiple = I2S_MCLK_MULTIPLE_256};
 
-// I2S pin configurations remain the same
+// Pin configurations
 static const i2s_pin_config_t i2s_mic_pins = {.mck_io_num = I2S_MCK_IO,
                                               .bck_io_num = I2S_BCK_IO_MIC,
                                               .ws_io_num = I2S_WS_IO_MIC,

@@ -12,12 +12,14 @@ static const char* TAG = "AEC_TEST";
 static AECHandler aec;
 
 // Buffers for audio processing
-static int32_t* i2s_read_buffer = nullptr;  // For 32-bit I2S reads
-static int16_t* process_buffer = nullptr;   // For actual processing (16-bit)
+static int32_t* i2s_read_buffer = nullptr;
+static int16_t* process_buffer = nullptr;
 
 // Initialize I2S peripherals
 static bool init_i2s() {
-  // Initialize I2S for microphone (I2S_NUM_1)
+  ESP_LOGI(TAG, "Initializing I2S...");
+
+  // Initialize I2S for microphone
   esp_err_t err = i2s_driver_install(I2S_PORT_MIC, &i2s_mic_config, 0, nullptr);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to install I2S mic driver: %d", err);
@@ -30,7 +32,7 @@ static bool init_i2s() {
     return false;
   }
 
-  // Initialize I2S for speaker (I2S_NUM_0)
+  // Initialize I2S for speaker
   err = i2s_driver_install(I2S_PORT_SPEAKER, &i2s_speaker_config, 0, nullptr);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to install I2S speaker driver: %d", err);
@@ -46,29 +48,28 @@ static bool init_i2s() {
   // Clear the speaker output buffer
   i2s_zero_dma_buffer(I2S_PORT_SPEAKER);
 
+  ESP_LOGI(TAG, "I2S initialized successfully");
   return true;
 }
 
 // Initialize audio processing buffers
 static bool init_buffers() {
-  // Allocate I2S read buffer (32-bit)
+  // Allocate buffers matching I2S frame size
   i2s_read_buffer = (int32_t*)heap_caps_malloc(
-      SAMPLES_PER_FRAME * sizeof(int32_t), MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+      I2S_FRAME_SIZE * sizeof(int32_t), MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
 
-  // Allocate processing buffer (16-bit)
-  process_buffer =
-      (int16_t*)heap_caps_malloc(SAMPLES_PER_FRAME * sizeof(int16_t),
-                                 MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+  process_buffer = (int16_t*)heap_caps_malloc(
+      I2S_FRAME_SIZE * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
   if (!i2s_read_buffer || !process_buffer) {
     ESP_LOGE(TAG, "Failed to allocate audio buffers");
     return false;
   }
 
+  ESP_LOGI(TAG, "Audio buffers initialized");
   return true;
 }
 
-// Clean up resources
 static void cleanup() {
   if (i2s_read_buffer) {
     heap_caps_free(i2s_read_buffer);
@@ -83,11 +84,10 @@ static void cleanup() {
   i2s_driver_uninstall(I2S_PORT_SPEAKER);
 }
 
-// Convert 32-bit I2S samples to 16-bit
 static void convert_samples(int32_t* input, int16_t* output, size_t samples) {
   for (size_t i = 0; i < samples; i++) {
-    // Convert 32-bit to 16-bit with proper scaling
-    output[i] = input[i] >> 14;  // Adjusted shift for better signal level
+    // Convert 32-bit to 16-bit with scaling
+    output[i] = input[i] >> 14;
   }
 }
 
@@ -97,14 +97,14 @@ static void audio_processing_task(void* arg) {
   size_t bytes_written = 0;
   size_t samples_processed = 0;
   const TickType_t xMaxBlockTime = pdMS_TO_TICKS(100);
+  const size_t read_size = I2S_FRAME_SIZE * sizeof(int32_t);
 
   ESP_LOGI(TAG, "Audio processing started");
 
   while (true) {
     // Read from I2S mic
-    esp_err_t err = i2s_read(I2S_PORT_MIC, i2s_read_buffer,
-                             SAMPLES_PER_FRAME * sizeof(int32_t), &bytes_read,
-                             xMaxBlockTime);
+    esp_err_t err = i2s_read(I2S_PORT_MIC, i2s_read_buffer, read_size,
+                             &bytes_read, xMaxBlockTime);
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "I2S read failed: %d", err);
@@ -113,15 +113,13 @@ static void audio_processing_task(void* arg) {
     }
 
     if (bytes_read > 0) {
-      // Convert 32-bit samples to 16-bit
-      convert_samples(i2s_read_buffer, process_buffer, SAMPLES_PER_FRAME);
+      size_t samples = bytes_read / sizeof(int32_t);
+      convert_samples(i2s_read_buffer, process_buffer, samples);
 
-      // Process audio through AEC
       int16_t* processed_audio =
           aec.processAudio(process_buffer, &samples_processed);
 
       if (processed_audio && samples_processed > 0) {
-        // Write processed audio to speaker
         err = i2s_write(I2S_PORT_SPEAKER, processed_audio,
                         samples_processed * sizeof(int16_t), &bytes_written,
                         xMaxBlockTime);
@@ -129,13 +127,11 @@ static void audio_processing_task(void* arg) {
         if (err != ESP_OK) {
           ESP_LOGE(TAG, "I2S write failed: %d", err);
         } else {
-          // Update reference buffer for AEC
           aec.updateReferenceBuffer(processed_audio, samples_processed);
         }
       }
     }
 
-    // Small delay to prevent task starvation
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
@@ -164,8 +160,10 @@ extern "C" void app_main(void) {
     return;
   }
 
-  // Create audio processing task
-  xTaskCreate(audio_processing_task, "audio_proc", 8192, nullptr, 5, nullptr);
+  // Create audio processing task with higher priority
+  xTaskCreate(audio_processing_task, "audio_proc", 8192, nullptr,
+              configMAX_PRIORITIES - 2,  // High priority
+              nullptr);
 
   ESP_LOGI(TAG, "AEC test application started successfully");
 }
