@@ -146,7 +146,6 @@ class AECHandler {
     AECHandler* handler = (AECHandler*)arg;
     handler->processingLoop();
   }
-
   void processingLoop() {
     const size_t frame_samples = frame_size;
     const TickType_t min_period = pdMS_TO_TICKS(15);  // ~16kHz sampling
@@ -172,26 +171,29 @@ class AECHandler {
     ESP_LOGI("AEC", "Starting AFE processing loop");
 
     while (is_running) {
-      printf("is_running loop");
-      // Try to maintain consistent timing
+      printf("is_running loop\n");
+      // Maintain consistent timing
       vTaskDelayUntil(&last_wake_time, min_period);
 
-      // Read from ring buffers
-      if (mic_buffer.read(mic_data, frame_samples) &&
-          ref_buffer.read(ref_data, frame_samples)) {
-        printf("read from mic");
+      // Attempt to read microphone data
+      if (mic_buffer.read(mic_data, frame_samples)) {
+        // Attempt to read reference data, fill with zeros if unavailable
+        if (!ref_buffer.read(ref_data, frame_samples)) {
+          memset(ref_data, 0, frame_samples * sizeof(int16_t));
+        }
+        printf("read from mic\n");
+
         // Interleave mic and reference data
         for (size_t i = 0; i < frame_samples; i++) {
-          combined[i * 2] = mic_data[i];      // Mic channel
-          combined[i * 2 + 1] = ref_data[i];  // Reference channel
+          combined[i * 2] = mic_data[i];
+          combined[i * 2 + 1] = ref_data[i];
         }
 
         // Feed interleaved data to AFE
         int feed_result = afe_handle->feed(afe_data, combined);
-        printf("before feed_result");
+        printf("before feed_result\n");
         if (feed_result == 0) {
-          // Try to fetch processed audio
-          printf("Try to fetch processed audio afe_fetch_result_t");
+          printf("Try to fetch processed audio afe_fetch_result_t\n");
           afe_fetch_result_t* result = afe_handle->fetch(afe_data);
           if (result && result->data && audio_callback) {
             size_t output_samples = result->data_size / sizeof(int16_t);
@@ -201,7 +203,7 @@ class AECHandler {
         } else {
           static int64_t last_error_time = 0;
           int64_t current_time = esp_timer_get_time() / 1000;
-          if (current_time - last_error_time > 1000) {  // Log once per second
+          if (current_time - last_error_time > 1000) {
             ESP_LOGW("AEC",
                      "AFE feed failed: %d, Frame size: %d, Total samples: %d",
                      feed_result, frame_size, frame_samples * 2);
