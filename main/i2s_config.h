@@ -6,11 +6,9 @@
 
 // Audio configuration
 #define SAMPLE_RATE 16000
-
-// AFE frame size is 320 samples
-#define I2S_FRAME_SIZE 320   // AFE frame size
-#define DMA_BUFFER_SIZE 320  // Match AFE frame size
-#define DMA_BUFFER_COUNT 4   // More buffers for better flow
+#define AFE_FRAME_SIZE 256   // AFE expects 320 samples
+#define DMA_BUFFER_SIZE 256  // Match AFE frame size exactly
+#define DMA_BUFFER_COUNT 4   // Number of DMA buffers
 
 // Pin definitions
 #define I2S_MCK_IO -1  // Not used
@@ -36,10 +34,9 @@ static const i2s_config_t i2s_mic_config = {
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = DMA_BUFFER_COUNT,
-    .dma_buf_len = DMA_BUFFER_SIZE,
+    .dma_buf_len = DMA_BUFFER_SIZE,  // IMPORTANT: Match AFE frame size
     .use_apll = false,
     .tx_desc_auto_clear = false,
-    .fixed_mclk = 0,
     .mclk_multiple = I2S_MCLK_MULTIPLE_256};
 
 // Configure I2S for MAX98357A Speaker
@@ -51,13 +48,11 @@ static const i2s_config_t i2s_speaker_config = {
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = DMA_BUFFER_COUNT,
-    .dma_buf_len = DMA_BUFFER_SIZE,
+    .dma_buf_len = DMA_BUFFER_SIZE,  // IMPORTANT: Match AFE frame size
     .use_apll = false,
     .tx_desc_auto_clear = true,
-    .fixed_mclk = 0,
     .mclk_multiple = I2S_MCLK_MULTIPLE_256};
 
-// Pin configurations
 static const i2s_pin_config_t i2s_mic_pins = {.mck_io_num = I2S_MCK_IO,
                                               .bck_io_num = I2S_BCK_IO_MIC,
                                               .ws_io_num = I2S_WS_IO_MIC,
