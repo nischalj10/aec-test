@@ -30,6 +30,8 @@ static opus_int16* output_buffer = nullptr;
 #define SPEAKER_CHANNELS 1
 #define MAX_AEC_FRAME 512
 #define OPUS_20MS_FRAME 320
+#define FETCH_TASK_PRIORITY configMAX_PRIORITIES - 2
+#define FEED_TASK_PRIORITY configMAX_PRIORITIES - 3
 
 // Task handles
 static TaskHandle_t micFeedTaskHandle = nullptr;
@@ -411,7 +413,7 @@ extern "C" void app_main(void) {
   // Create fetch task first (higher priority)
   BaseType_t ret =
       xTaskCreatePinnedToCore(aecFetchTask, "aecFetch", 24576, NULL,
-                              configMAX_PRIORITIES - 2, &aecFetchTaskHandle, 0);
+                              FETCH_TASK_PRIORITY, &aecFetchTaskHandle, 0);
 
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create fetch task");
@@ -423,9 +425,8 @@ extern "C" void app_main(void) {
   vTaskDelay(pdMS_TO_TICKS(10));
 
   // Create mic feed task
-  ret =
-      xTaskCreatePinnedToCore(micFeedTask, "micFeed", 24576, NULL,
-                              configMAX_PRIORITIES - 3, &micFeedTaskHandle, 1);
+  ret = xTaskCreatePinnedToCore(micFeedTask, "micFeed", 24576, NULL,
+                                FEED_TASK_PRIORITY, &micFeedTaskHandle, 1);
 
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create mic task");
