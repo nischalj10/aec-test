@@ -8,21 +8,17 @@
 #include "i2s_config.h"
 
 /**
- * SrAecHandler:
- *   - Uses ESP_AFE_SR_HANDLE (speech recognition pipeline),
- *   - Single mic + reference => AEC,
- *   - Also enable `se_init = true` for noise suppression (NS),
- *   - No VAD or wake word => so the pipeline always returns audio.
+ * A simple AEC/NS pipeline using ESP_AFE_SR_HANDLE.
+ * We feed 512 samples every ~32ms, fetch once, if no data => skip quickly.
  */
 class SrAecHandler {
  public:
   SrAecHandler() : afe_handle(nullptr), afe_data(nullptr), frame_size(0) {}
 
   bool init() {
-    // Use SR handle
     afe_handle = const_cast<esp_afe_sr_iface_t*>(&ESP_AFE_SR_HANDLE);
     if (!afe_handle) {
-      ESP_LOGE("SR_AEC", "Failed to get SR handle!");
+      ESP_LOGE(TAG, "Failed to get SR handle!");
       return false;
     }
 
@@ -42,76 +38,30 @@ class SrAecHandler {
     // We do not use voice_communication_init here
     cfg.voice_communication_init = false;
     cfg.afe_mode = SR_MODE_HIGH_PERF;
-    cfg.afe_linear_gain = 0.25;
+    cfg.afe_linear_gain = 0.3;
 
-    // Create from config
     afe_data = afe_handle->create_from_config(&cfg);
     if (!afe_data) {
-      ESP_LOGE("SR_AEC", "Failed to create AFE instance");
+      ESP_LOGE(TAG, "Failed to create AFE instance");
       return false;
     }
 
-    // Each channel: "feed_chunksize" 16-bit samples
     frame_size = afe_handle->get_feed_chunksize(afe_data);
-    ESP_LOGI("SR_AEC", "SR AFE frame_size per channel = %d", (int)frame_size);
-
+    ESP_LOGI(TAG, "AEC frame_size=%d (samples per channel)", (int)frame_size);
     return true;
   }
 
   size_t getFrameSize() const { return frame_size; }
 
-  /**
-   * processAudio:
-   *   - mic_32: pointer to frame_size 32-bit mic samples
-   *   - ref_16: pointer to frame_size 16-bit reference data
-   *   - out_size: number of 16-bit samples returned
-   */
-  int16_t* processAudio(const int32_t* mic_32, const int16_t* ref_16,
-                        size_t* out_size) {
-    *out_size = 0;
-    if (!afe_data || !mic_32 || !ref_16) {
-      return nullptr;
-    }
+  int feedInterleaved(const int16_t* interleaved) {
+    if (!afe_data || !interleaved) return -1;
+    return afe_handle->feed(afe_data, interleaved);
+  }
 
-    const size_t total_16 = frame_size * 2;  // mic + ref interleaved
-    int16_t* interleaved = (int16_t*)heap_caps_malloc(
-        total_16 * sizeof(int16_t), MALLOC_CAP_INTERNAL);
-    if (!interleaved) {
-      ESP_LOGE("SR_AEC", "OOM interleaved");
-      return nullptr;
-    }
-
-    // Build interleaved buffer
-    for (size_t i = 0; i < frame_size; i++) {
-      // Convert 32-bit mic => 16-bit
-      interleaved[2 * i + 0] = (int16_t)(mic_32[i] >> 14);
-      // Reference is already 16-bit
-      interleaved[2 * i + 1] = ref_16[i];
-    }
-
-    // Feed
-    int fed = afe_handle->feed(afe_data, interleaved);
-    heap_caps_free(interleaved);
-
-    if (fed < 0) {
-      ESP_LOGE("SR_AEC", "feed() error: %d", fed);
-      return nullptr;
-    }
-
-    // Fetch
-    afe_fetch_result_t* result = nullptr;
-    for (int tries = 0; tries < 3; tries++) {
-      result = afe_handle->fetch(afe_data);
-      if (result && result->data) break;
-      vTaskDelay(pdMS_TO_TICKS(1));
-    }
-
-    if (!result || !result->data) {
-      return nullptr;  // No output yet
-    }
-
-    *out_size = result->data_size / sizeof(int16_t);
-    return (int16_t*)result->data;
+  // Non-blocking single fetch attempt
+  afe_fetch_result_t* fetchOnce() {
+    if (!afe_data) return nullptr;
+    return afe_handle->fetch(afe_data);
   }
 
   void deinit() {
@@ -123,6 +73,7 @@ class SrAecHandler {
   }
 
  private:
+  static constexpr const char* TAG = "SR_AEC";
   esp_afe_sr_iface_t* afe_handle;
   esp_afe_sr_data_t* afe_data;
   size_t frame_size;
